@@ -1,7 +1,10 @@
 package git
 
 import (
+	"encoding/base64"
 	"fmt"
+	"io/ioutil"
+	"log"
 	"strings"
 
 	"github.com/hashicorp/terraform-plugin-sdk/helper/schema"
@@ -52,6 +55,10 @@ func ResourceGitBranch() *schema.Resource {
 				ValidateFunc:     validation.StringIsNotEmpty,
 				DiffSuppressFunc: suppress.CaseDifference,
 			},
+			"content": {
+				Type:     schema.TypeString,
+				Optional: true,
+			},
 			"url": {
 				Type:     schema.TypeString,
 				Computed: true,
@@ -72,13 +79,14 @@ func resourceGitBranchCreate(d *schema.ResourceData, m interface{}) error {
 	projectID := d.Get("project_id").(string)
 	oldObjectID := d.Get("old_object_id").(string)
 	newObjectID := d.Get("new_object_id").(string)
+	content := d.Get("content").(string)
 	branch := &git.GitRefUpdate{
 		Name:        &name,
 		OldObjectId: &oldObjectID,
 		NewObjectId: &newObjectID,
 	}
 
-	_, err := createGitBranch(clients, branch, &repoName, &projectID)
+	_, err := createGitBranch(clients, branch, &repoName, &projectID, &content)
 	if err != nil {
 		return fmt.Errorf("Error creating branch in Azure DevOps: %+v", err)
 	}
@@ -114,6 +122,7 @@ func resourceGitBranchDelete(d *schema.ResourceData, m interface{}) error {
 	name := d.Get("name").(string)
 	repoName := d.Get("repo_name").(string)
 	projectID := d.Get("project_id").(string)
+	content := d.Get("content").(string)
 
 	clients := m.(*client.AggregatedClient)
 	branch, err := gitBranchRead(clients, name, repoName, projectID)
@@ -132,7 +141,7 @@ func resourceGitBranchDelete(d *schema.ResourceData, m interface{}) error {
 		NewObjectId: &deletedObjectId,
 	}
 
-	_, err = createGitBranch(clients, branchUpdate, &repoName, &projectID)
+	_, err = createGitBranch(clients, branchUpdate, &repoName, &projectID, &content)
 	if err != nil {
 		return fmt.Errorf("Error deleting branch in Azure DevOps: %+v", err)
 	}
@@ -141,7 +150,7 @@ func resourceGitBranchDelete(d *schema.ResourceData, m interface{}) error {
 	return nil
 }
 
-func createGitBranch(clients *client.AggregatedClient, branch *git.GitRefUpdate, repoName *string, projectID *string) (*git.GitRefUpdateResult, error) {
+func createGitBranch(clients *client.AggregatedClient, branch *git.GitRefUpdate, repoName *string, projectID *string, contentFile *string) (*git.GitRefUpdateResult, error) {
 	args := git.UpdateRefsArgs{
 		RefUpdates:   &[]git.GitRefUpdate{*branch},
 		RepositoryId: repoName,
@@ -155,6 +164,46 @@ func createGitBranch(clients *client.AggregatedClient, branch *git.GitRefUpdate,
 	refResult := (*updateRefsResult)[0]
 	if *refResult.Success != true {
 		return nil, fmt.Errorf("Branch creation failed due to %s", refResult.CustomMessage)
+	}
+	log.Printf("\n\nDONE WITH BRANCH CREATION------------------------------------------------------------------------------------\n\n")
+
+	// scaffold content
+	commitMessage := "Scaffolding content"
+	filePath := "repo.sh"
+	content, err := ioutil.ReadFile(*contentFile)
+	base64Content := base64.StdEncoding.EncodeToString(content)
+	pushArgs := git.CreatePushArgs{
+		Project:      projectID,
+		RepositoryId: repoName,
+		Push: &git.GitPush{
+			RefUpdates: &[]git.GitRefUpdate{
+				{
+					Name:        refResult.Name,
+					OldObjectId: refResult.NewObjectId,
+				},
+			},
+			Commits: &[]git.GitCommitRef{
+				{
+					Comment: &commitMessage,
+					Changes: &[]interface{}{
+						&Change{
+							ChangeType: &git.VersionControlChangeTypeValues.Add,
+							Item: &ChangeItem{
+								Path: &filePath,
+							},
+							NewContent: &git.ItemContent{
+								Content:     &base64Content,
+								ContentType: &git.ItemContentTypeValues.Base64Encoded,
+							},
+						},
+					},
+				},
+			},
+		},
+	}
+	_, err = clients.GitReposClient.CreatePush(clients.Ctx, pushArgs)
+	if err != nil {
+		return nil, err
 	}
 
 	return &refResult, nil
@@ -193,4 +242,21 @@ func flattenGitBranch(d *schema.ResourceData, branch *git.GitRef) error {
 	d.Set("url", branch.Url)
 
 	return nil
+}
+
+type Change struct {
+	// The type of change that was made to the item.
+	ChangeType *git.VersionControlChangeType `json:"changeType,omitempty"`
+	// Current version.
+	Item *ChangeItem `json:"item,omitempty"`
+	// Content of the item after the change.
+	NewContent *git.ItemContent `json:"newContent,omitempty"`
+	// Path of the item on the server.
+	SourceServerItem *string `json:"sourceServerItem,omitempty"`
+	// URL to retrieve the item.
+	Url *string `json:"url,omitempty"`
+}
+
+type ChangeItem struct {
+	Path *string `json:"path,omitempty"`
 }
