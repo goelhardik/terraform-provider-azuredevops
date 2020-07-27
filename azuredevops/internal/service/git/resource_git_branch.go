@@ -17,6 +17,7 @@ func ResourceGitBranch() *schema.Resource {
 	return &schema.Resource{
 		Create: resourceGitBranchCreate,
 		Read:   resourceGitBranchRead,
+		Update: resourceGitBranchUpdate,
 		Delete: resourceGitBranchDelete,
 
 		Schema: map[string]*schema.Schema{
