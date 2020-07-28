@@ -4,7 +4,8 @@ import (
 	"encoding/base64"
 	"fmt"
 	"io/ioutil"
-	"log"
+	"os"
+	"path/filepath"
 	"strings"
 
 	"github.com/hashicorp/terraform-plugin-sdk/helper/schema"
@@ -56,8 +57,14 @@ func ResourceGitBranch() *schema.Resource {
 				DiffSuppressFunc: suppress.CaseDifference,
 			},
 			"content": {
-				Type:     schema.TypeString,
-				Optional: true,
+				Type:         schema.TypeString,
+				ValidateFunc: validation.StringIsNotEmpty,
+				Optional:     true,
+			},
+			"root_path": {
+				Type:         schema.TypeString,
+				ValidateFunc: validation.StringIsNotEmpty,
+				Optional:     true,
 			},
 			"url": {
 				Type:     schema.TypeString,
@@ -80,15 +87,23 @@ func resourceGitBranchCreate(d *schema.ResourceData, m interface{}) error {
 	oldObjectID := d.Get("old_object_id").(string)
 	newObjectID := d.Get("new_object_id").(string)
 	content := d.Get("content").(string)
+	rootPath := d.Get("root_path").(string)
 	branch := &git.GitRefUpdate{
 		Name:        &name,
 		OldObjectId: &oldObjectID,
 		NewObjectId: &newObjectID,
 	}
 
-	_, err := createGitBranch(clients, branch, &repoName, &projectID, &content)
+	refResult, err := createGitBranch(clients, branch, &repoName, &projectID, &content, &rootPath)
 	if err != nil {
 		return fmt.Errorf("Error creating branch in Azure DevOps: %+v", err)
+	}
+
+	if content != "" {
+		err = scaffoldFiles(clients, &content, &rootPath, &projectID, &repoName, refResult.Name, refResult.NewObjectId)
+		if err != nil {
+			return fmt.Errorf("Error creating branch in Azure DevOps: %+v", err)
+		}
 	}
 
 	return resourceGitBranchRead(d, m)
@@ -107,6 +122,10 @@ func resourceGitBranchRead(d *schema.ResourceData, m interface{}) error {
 		}
 		return fmt.Errorf("Error looking up branch with Name %s in Repo %s. Error: %v", name, repoName, err)
 	}
+	if branch == nil {
+		d.SetId("")
+		return nil
+	}
 	err = flattenGitBranch(d, branch)
 	if err != nil {
 		return fmt.Errorf("Error flattening Git branch: %w", err)
@@ -123,6 +142,7 @@ func resourceGitBranchDelete(d *schema.ResourceData, m interface{}) error {
 	repoName := d.Get("repo_name").(string)
 	projectID := d.Get("project_id").(string)
 	content := d.Get("content").(string)
+	rootPath := d.Get("root_path").(string)
 
 	clients := m.(*client.AggregatedClient)
 	branch, err := gitBranchRead(clients, name, repoName, projectID)
@@ -141,7 +161,7 @@ func resourceGitBranchDelete(d *schema.ResourceData, m interface{}) error {
 		NewObjectId: &deletedObjectId,
 	}
 
-	_, err = createGitBranch(clients, branchUpdate, &repoName, &projectID, &content)
+	_, err = createGitBranch(clients, branchUpdate, &repoName, &projectID, &content, &rootPath)
 	if err != nil {
 		return fmt.Errorf("Error deleting branch in Azure DevOps: %+v", err)
 	}
@@ -150,7 +170,7 @@ func resourceGitBranchDelete(d *schema.ResourceData, m interface{}) error {
 	return nil
 }
 
-func createGitBranch(clients *client.AggregatedClient, branch *git.GitRefUpdate, repoName *string, projectID *string, contentFile *string) (*git.GitRefUpdateResult, error) {
+func createGitBranch(clients *client.AggregatedClient, branch *git.GitRefUpdate, repoName *string, projectID *string, contentFile *string, rootPath *string) (*git.GitRefUpdateResult, error) {
 	args := git.UpdateRefsArgs{
 		RefUpdates:   &[]git.GitRefUpdate{*branch},
 		RepositoryId: repoName,
@@ -165,48 +185,69 @@ func createGitBranch(clients *client.AggregatedClient, branch *git.GitRefUpdate,
 	if *refResult.Success != true {
 		return nil, fmt.Errorf("Branch creation failed due to %s", refResult.CustomMessage)
 	}
-	log.Printf("\n\nDONE WITH BRANCH CREATION------------------------------------------------------------------------------------\n\n")
 
+	return &refResult, nil
+}
+
+func scaffoldFiles(clients *client.AggregatedClient, contentFile *string, rootPath *string, projectID *string, repoName *string, branchName *string, branchObjectID *string) error {
 	// scaffold content
+	var changes []interface{}
 	commitMessage := "Scaffolding content"
-	filePath := "repo.sh"
-	content, err := ioutil.ReadFile(*contentFile)
-	base64Content := base64.StdEncoding.EncodeToString(content)
+	basePath := *contentFile
+	_ = filepath.Walk(basePath, func(path string, info os.FileInfo, err error) error {
+		if info.IsDir() {
+			return nil
+		}
+		content, err := ioutil.ReadFile(path)
+		if err != nil {
+			return fmt.Errorf("Unable to read file %s", path)
+		}
+		base64Content := base64.StdEncoding.EncodeToString(content)
+		relativePath, err := filepath.Rel(basePath, path)
+		if err != nil {
+			return fmt.Errorf("Unable to get relative path for file %s", path)
+		}
+		relativePath = *rootPath + "/" + relativePath
+
+		change := &Change{
+			ChangeType: &git.VersionControlChangeTypeValues.Add,
+			Item: &ChangeItem{
+				Path: &relativePath,
+			},
+			NewContent: &git.ItemContent{
+				Content:     &base64Content,
+				ContentType: &git.ItemContentTypeValues.Base64Encoded,
+			},
+		}
+		changes = append(changes, change)
+
+		return nil
+	})
+
 	pushArgs := git.CreatePushArgs{
 		Project:      projectID,
 		RepositoryId: repoName,
 		Push: &git.GitPush{
 			RefUpdates: &[]git.GitRefUpdate{
 				{
-					Name:        refResult.Name,
-					OldObjectId: refResult.NewObjectId,
+					Name:        branchName,
+					OldObjectId: branchObjectID,
 				},
 			},
 			Commits: &[]git.GitCommitRef{
 				{
 					Comment: &commitMessage,
-					Changes: &[]interface{}{
-						&Change{
-							ChangeType: &git.VersionControlChangeTypeValues.Add,
-							Item: &ChangeItem{
-								Path: &filePath,
-							},
-							NewContent: &git.ItemContent{
-								Content:     &base64Content,
-								ContentType: &git.ItemContentTypeValues.Base64Encoded,
-							},
-						},
-					},
+					Changes: &changes,
 				},
 			},
 		},
 	}
-	_, err = clients.GitReposClient.CreatePush(clients.Ctx, pushArgs)
+	_, err := clients.GitReposClient.CreatePush(clients.Ctx, pushArgs)
 	if err != nil {
-		return nil, err
+		return err
 	}
 
-	return &refResult, nil
+	return nil
 }
 
 // Lookup an Azure Git branch using the name.
@@ -226,12 +267,12 @@ func gitBranchRead(clients *client.AggregatedClient, branchName string, repoName
 		for _, ref := range getRefsResponse.Value {
 			if strings.EqualFold(*ref.Name, branchName) {
 				branch = &ref
-				break
+				return branch, err
 			}
 		}
 	}
 
-	return branch, err
+	return nil, nil
 }
 
 func flattenGitBranch(d *schema.ResourceData, branch *git.GitRef) error {
