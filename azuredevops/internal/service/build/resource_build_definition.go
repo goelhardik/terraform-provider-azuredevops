@@ -390,6 +390,7 @@ func createBuildDefinition(clients *client.AggregatedClient, buildDefinition *bu
 		})
 
 		buildDefinition.Process = buildDefinitionToClone.Process
+		buildDefinition.Repository = buildDefinitionToClone.Repository
 
 		createdBuild, err := clients.BuildClient.CreateDefinition(clients.Ctx, build.CreateDefinitionArgs{
 			Definition:          buildDefinition,
@@ -956,7 +957,7 @@ func expandBuildDefinition(d *schema.ResourceData) (*build.BuildDefinition, stri
  */
 func validateServiceConnectionIDExistsIfNeeded(d *schema.ResourceData) error {
 	repositories := d.Get("repository").([]interface{})
-	if repositories == nil {
+	if len(repositories) == 0 {
 		return nil
 	}
 	repository := repositories[0].(map[string]interface{})
