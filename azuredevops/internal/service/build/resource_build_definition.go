@@ -72,6 +72,16 @@ func ResourceBuildDefinition() *schema.Resource {
 		Delete:   resourceBuildDefinitionDelete,
 		Importer: tfhelper.ImportProjectQualifiedResource(),
 		Schema: map[string]*schema.Schema{
+			"definition_to_clone_id": {
+				Type:     schema.TypeInt,
+				Optional: true,
+				Required: false,
+			},
+			"definition_to_clone_revision": {
+				Type:     schema.TypeInt,
+				Optional: true,
+				Required: false,
+			},
 			"project_id": {
 				Type:     schema.TypeString,
 				Required: true,
@@ -149,7 +159,7 @@ func ResourceBuildDefinition() *schema.Resource {
 					Schema: map[string]*schema.Schema{
 						"yml_path": {
 							Type:     schema.TypeString,
-							Required: true,
+							Optional: true,
 						},
 						"repo_id": {
 							Type:     schema.TypeString,
@@ -300,12 +310,12 @@ func resourceBuildDefinitionCreate(d *schema.ResourceData, m interface{}) error 
 	if err != nil {
 		return err
 	}
-	buildDefinition, projectID, err := expandBuildDefinition(d)
+	buildDefinition, projectID, definitionToCloneId, definitionToCloneRevision, err := expandBuildDefinition(d)
 	if err != nil {
 		return fmt.Errorf("error creating resource Build Definition: %+v", err)
 	}
 
-	createdBuildDefinition, err := createBuildDefinition(clients, buildDefinition, projectID)
+	createdBuildDefinition, err := createBuildDefinition(clients, buildDefinition, projectID, definitionToCloneId, definitionToCloneRevision)
 	if err != nil {
 		return fmt.Errorf("error creating resource Build Definition: %+v", err)
 	}
@@ -371,7 +381,25 @@ func flattenBuildVariables(d *schema.ResourceData, buildDefinition *build.BuildD
 	return variables
 }
 
-func createBuildDefinition(clients *client.AggregatedClient, buildDefinition *build.BuildDefinition, project string) (*build.BuildDefinition, error) {
+func createBuildDefinition(clients *client.AggregatedClient, buildDefinition *build.BuildDefinition, project string, definitionToCloneId int, definitionToCloneRevision int) (*build.BuildDefinition, error) {
+	
+	if definitionToCloneId > 0 {
+		buildDefinitionToClone, err := clients.BuildClient.GetDefinition(clients.Ctx, build.GetDefinitionArgs{
+			Project:      &project,
+			DefinitionId: &definitionToCloneId,
+		})
+
+		buildDefinition.Process = buildDefinitionToClone.Process
+
+		createdBuild, err := clients.BuildClient.CreateDefinition(clients.Ctx, build.CreateDefinitionArgs{
+			Definition: buildDefinition,
+			Project:    &project,
+			DefinitionToCloneId: &definitionToCloneId,
+		})
+	
+		return createdBuild, err
+	}
+	
 	createdBuild, err := clients.BuildClient.CreateDefinition(clients.Ctx, build.CreateDefinitionArgs{
 		Definition: buildDefinition,
 		Project:    &project,
@@ -430,7 +458,7 @@ func resourceBuildDefinitionUpdate(d *schema.ResourceData, m interface{}) error 
 	if err != nil {
 		return err
 	}
-	buildDefinition, projectID, err := expandBuildDefinition(d)
+	buildDefinition, projectID, _, _, err := expandBuildDefinition(d)
 	if err != nil {
 		return err
 	}
@@ -471,7 +499,9 @@ func flattenRepository(buildDefinition *build.BuildDefinition) interface{} {
 	// available from the compiler is `interface{}` so we can probe for known
 	// implementations
 	if processMap, ok := buildDefinition.Process.(map[string]interface{}); ok {
-		yamlFilePath = processMap["yamlFilename"].(string)
+		if(processMap["yamlFilename"] != nil) {
+			yamlFilePath = processMap["yamlFilename"].(string)			
+		}
 	}
 	if yamlProcess, ok := buildDefinition.Process.(*build.YamlProcess); ok {
 		yamlFilePath = *yamlProcess.YamlFilename
@@ -825,13 +855,16 @@ func expandVariables(d *schema.ResourceData) (*map[string]build.BuildDefinitionV
 	return &expandedVars, nil
 }
 
-func expandBuildDefinition(d *schema.ResourceData) (*build.BuildDefinition, string, error) {
+func expandBuildDefinition(d *schema.ResourceData) (*build.BuildDefinition, string, int, int, error) {
 	projectID := d.Get("project_id").(string)
 	repositories := d.Get("repository").([]interface{})
 
+	definitionToCloneId := d.Get("definition_to_clone_id").(int)
+	definitionToCloneRevision := d.Get("definition_to_clone_revision").(int)
+
 	// Note: If configured, this will be of length 1 based on the schema definition above.
 	if len(repositories) != 1 {
-		return nil, "", fmt.Errorf("Unexpectedly did not find repository metadata in the resource data")
+		return nil, "", definitionToCloneId, definitionToCloneRevision, fmt.Errorf("Unexpectedly did not find repository metadata in the resource data")
 	}
 
 	repository := repositories[0].(map[string]interface{})
@@ -878,7 +911,7 @@ func expandBuildDefinition(d *schema.ResourceData) (*build.BuildDefinition, stri
 	agentPoolName := d.Get("agent_pool_name").(string)
 	variables, err := expandVariables(d)
 	if err != nil {
-		return nil, "", fmt.Errorf("Error expanding varibles: %+v", err)
+		return nil, "", definitionToCloneId, definitionToCloneRevision, fmt.Errorf("Error expanding varibles: %+v", err)
 	}
 
 	buildDefinition := build.BuildDefinition{
@@ -914,7 +947,7 @@ func expandBuildDefinition(d *schema.ResourceData) (*build.BuildDefinition, stri
 		Triggers:       &buildTriggers,
 	}
 
-	return &buildDefinition, projectID, nil
+	return &buildDefinition, projectID, definitionToCloneId, definitionToCloneRevision, nil
 }
 
 /**
