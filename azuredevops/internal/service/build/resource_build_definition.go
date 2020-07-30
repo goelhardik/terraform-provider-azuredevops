@@ -152,7 +152,7 @@ func ResourceBuildDefinition() *schema.Resource {
 			},
 			"repository": {
 				Type:     schema.TypeList,
-				Required: true,
+				Optional: true,
 				MinItems: 1,
 				MaxItems: 1,
 				Elem: &schema.Resource{
@@ -382,7 +382,7 @@ func flattenBuildVariables(d *schema.ResourceData, buildDefinition *build.BuildD
 }
 
 func createBuildDefinition(clients *client.AggregatedClient, buildDefinition *build.BuildDefinition, project string, definitionToCloneId int, definitionToCloneRevision int) (*build.BuildDefinition, error) {
-	
+
 	if definitionToCloneId > 0 {
 		buildDefinitionToClone, err := clients.BuildClient.GetDefinition(clients.Ctx, build.GetDefinitionArgs{
 			Project:      &project,
@@ -392,14 +392,14 @@ func createBuildDefinition(clients *client.AggregatedClient, buildDefinition *bu
 		buildDefinition.Process = buildDefinitionToClone.Process
 
 		createdBuild, err := clients.BuildClient.CreateDefinition(clients.Ctx, build.CreateDefinitionArgs{
-			Definition: buildDefinition,
-			Project:    &project,
+			Definition:          buildDefinition,
+			Project:             &project,
 			DefinitionToCloneId: &definitionToCloneId,
 		})
-	
+
 		return createdBuild, err
 	}
-	
+
 	createdBuild, err := clients.BuildClient.CreateDefinition(clients.Ctx, build.CreateDefinitionArgs{
 		Definition: buildDefinition,
 		Project:    &project,
@@ -499,8 +499,8 @@ func flattenRepository(buildDefinition *build.BuildDefinition) interface{} {
 	// available from the compiler is `interface{}` so we can probe for known
 	// implementations
 	if processMap, ok := buildDefinition.Process.(map[string]interface{}); ok {
-		if(processMap["yamlFilename"] != nil) {
-			yamlFilePath = processMap["yamlFilename"].(string)			
+		if processMap["yamlFilename"] != nil {
+			yamlFilePath = processMap["yamlFilename"].(string)
 		}
 	}
 	if yamlProcess, ok := buildDefinition.Process.(*build.YamlProcess); ok {
@@ -956,6 +956,9 @@ func expandBuildDefinition(d *schema.ResourceData) (*build.BuildDefinition, stri
  */
 func validateServiceConnectionIDExistsIfNeeded(d *schema.ResourceData) error {
 	repositories := d.Get("repository").([]interface{})
+	if repositories == nil {
+		return nil
+	}
 	repository := repositories[0].(map[string]interface{})
 
 	repoType := repository["repo_type"].(string)
