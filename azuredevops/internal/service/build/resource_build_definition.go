@@ -99,7 +99,6 @@ func ResourceBuildDefinition() *schema.Resource {
 			"path": {
 				Type:         schema.TypeString,
 				Optional:     true,
-				Default:      `\`,
 				ValidateFunc: validate.Path,
 			},
 			"variable_groups": {
@@ -148,7 +147,6 @@ func ResourceBuildDefinition() *schema.Resource {
 			"agent_pool_name": {
 				Type:     schema.TypeString,
 				Optional: true,
-				Default:  "Hosted Ubuntu 1604",
 			},
 			"repository": {
 				Type:     schema.TypeList,
@@ -315,7 +313,7 @@ func resourceBuildDefinitionCreate(d *schema.ResourceData, m interface{}) error 
 		return fmt.Errorf("error creating resource Build Definition: %+v", err)
 	}
 
-	createdBuildDefinition, err := createBuildDefinition(clients, buildDefinition, projectID, definitionToCloneId, definitionToCloneRevision)
+	createdBuildDefinition, err := createBuildDefinition(d, clients, buildDefinition, projectID, definitionToCloneId, definitionToCloneRevision)
 	if err != nil {
 		return fmt.Errorf("error creating resource Build Definition: %+v", err)
 	}
@@ -381,19 +379,23 @@ func flattenBuildVariables(d *schema.ResourceData, buildDefinition *build.BuildD
 	return variables
 }
 
-func createBuildDefinition(clients *client.AggregatedClient, buildDefinition *build.BuildDefinition, project string, definitionToCloneId int, definitionToCloneRevision int) (*build.BuildDefinition, error) {
+func createBuildDefinition(d *schema.ResourceData, clients *client.AggregatedClient, buildDefinition *build.BuildDefinition, project string, definitionToCloneId int, definitionToCloneRevision int) (*build.BuildDefinition, error) {
 
 	if definitionToCloneId > 0 {
 		buildDefinitionToClone, err := clients.BuildClient.GetDefinition(clients.Ctx, build.GetDefinitionArgs{
 			Project:      &project,
 			DefinitionId: &definitionToCloneId,
 		})
-
-		buildDefinition.Process = buildDefinitionToClone.Process
-		buildDefinition.Repository = buildDefinitionToClone.Repository
+		newBuildDefinition := build.BuildDefinition{
+			Name:       converter.String(d.Get("name").(string)),
+			Path:       buildDefinitionToClone.Path,
+			Process:    buildDefinitionToClone.Process,
+			Repository: buildDefinitionToClone.Repository,
+			Queue:      buildDefinitionToClone.Queue,
+		}
 
 		createdBuild, err := clients.BuildClient.CreateDefinition(clients.Ctx, build.CreateDefinitionArgs{
-			Definition:          buildDefinition,
+			Definition:          &newBuildDefinition,
 			Project:             &project,
 			DefinitionToCloneId: &definitionToCloneId,
 		})
@@ -863,6 +865,9 @@ func expandBuildDefinition(d *schema.ResourceData) (*build.BuildDefinition, stri
 	definitionToCloneId := d.Get("definition_to_clone_id").(int)
 	definitionToCloneRevision := d.Get("definition_to_clone_revision").(int)
 
+	if definitionToCloneId > 0 {
+		return nil, projectID, definitionToCloneId, definitionToCloneRevision, nil
+	}
 	// Note: If configured, this will be of length 1 based on the schema definition above.
 	if len(repositories) != 1 {
 		return nil, "", definitionToCloneId, definitionToCloneRevision, fmt.Errorf("Unexpectedly did not find repository metadata in the resource data")
